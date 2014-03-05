@@ -1,3 +1,8 @@
+#ifndef OPTIONPARSER_H
+#define OPTIONPARSER_H
+
+#include "Expected.hpp"
+
 #include <string>
 #include <vector>
 #include <functional>
@@ -71,47 +76,36 @@ public:
 
 
 class OptionSwitch {
+public:
+    typedef std::function<void(const std::string& arg)> CallbackType;
+    typedef std::function<void()>                       VoidCallbackType;
+
 private:
-    std::string m_shortOpt;
-    std::string m_longOpt;
-    bool        m_hasParameter;
-    bool        m_parameterOptional;
-    std::string m_helpText;
+    std::string  m_shortOpt;
+    std::string  m_longOpt;
+    CallbackType m_cb;
+    bool         m_hasParameter;
+    bool         m_parameterOptional;
+    std::string  m_helpText;
 
 public:
-    OptionSwitch(const char* shortOpt) :
-        OptionSwitch(shortOpt, "", false, false, "") {}
-    OptionSwitch(const char* shortOpt, const char* longOpt,
-            bool hasParameter = false, bool parameterOptional = false) :
-        OptionSwitch(shortOpt, longOpt, hasParameter, parameterOptional, "") {}
+    // This is the canonical constructor.
+    OptionSwitch(std::string shortOpt,
+                 std::string longOpt = "")
+        : m_shortOpt(shortOpt), m_longOpt(longOpt) { }
 
-    OptionSwitch(std::string shortOpt) :
-        OptionSwitch(shortOpt, "", false, false, "") {}
-    OptionSwitch(std::string shortOpt, std::string longOpt,
-            bool hasParameter = false, bool parameterOptional = false) :
-        OptionSwitch(shortOpt, longOpt, hasParameter, parameterOptional, "") {}
-
-    OptionSwitch(const char* shortOpt, const char* longOpt,
-                 bool hasParameter, bool parameterOptional,
-                 const char* helpText) :
-        m_shortOpt(shortOpt), m_longOpt(longOpt),
-        m_hasParameter(hasParameter), m_parameterOptional(parameterOptional),
-        m_helpText(helpText) { }
-    OptionSwitch(std::string shortOpt, std::string longOpt,
-                 bool hasParameter, bool parameterOptional,
-                 std::string helpText) :
-        m_shortOpt(shortOpt), m_longOpt(longOpt),
-        m_hasParameter(hasParameter), m_parameterOptional(parameterOptional),
-        m_helpText(helpText) { }
-
-    OptionSwitch* SetHelpText(std::string& txt) {
+    // Help text
+    // --------------------------------------------------
+    OptionSwitch& SetHelpText(std::string& txt) {
         m_helpText = txt;
-        return this;
+        return *this;
     }
     const std::string& GetHelpText() const {
         return m_helpText;
     }
 
+    // Option(s)
+    // --------------------------------------------------
     inline bool HasShortOpt() const {
         return m_shortOpt.length() > 0;
     }
@@ -126,53 +120,83 @@ public:
         return m_longOpt;
     }
 
+    // Parameter
+    // --------------------------------------------------
+    OptionSwitch& SetParameter(bool param) {
+        m_hasParameter = param;
+        return *this;
+    }
     inline bool HasParameter() const {
         return m_hasParameter;
     }
+
+    OptionSwitch& SetParameterOptional(bool opt) {
+        m_parameterOptional = opt;
+        return *this;
+    }
     inline bool ParamOptional() const {
         return m_parameterOptional;
+    }
+
+    // Callback
+    // --------------------------------------------------
+    OptionSwitch& SetCallback(CallbackType cb) {
+        m_cb = cb;
+        return *this;
+    }
+    OptionSwitch& SetCallback(VoidCallbackType cb) {
+        m_cb = [=](const std::string&) -> void {
+            cb();
+        };
+        return *this;
+    }
+    const CallbackType GetCallback() const {
+        return m_cb;
+    }
+    void CallCallback(const std::string& arg) {
+        return m_cb(arg);
+    }
+    void CallCallback() {
+        return m_cb("");
     }
 };
 
 
 class OptionParser {
 private:
-    typedef std::function<void(const std::string& arg)> cb_type_t;
-    typedef std::tuple<OptionSwitch, cb_type_t, bool>   opt_tuple_t;
-
-    std::vector< opt_tuple_t > m_options;
+    std::vector< OptionSwitch > m_options;
 
 public:
     OptionParser() { }
 
-    std::vector< std::string > Parse(int argc, char* argv[]) {
+    Expected<std::vector<std::string>> Parse(int argc, char* argv[]) {
         // This is the vector range constructor.
         return Parse(std::vector< std::string>(argv + 1, argv + argc));
     }
 
-    std::vector< std::string > Parse(std::vector< std::string > args) {
+    Expected<std::vector<std::string>> Parse(std::vector< std::string > args) {
         std::vector< std::string > rest;
         size_t i = 0;
 
         // This is a helper "function" that abstracts out parsing an argument
         // with a parameter.
-        auto parseArgument = [&args, &i](OptionSwitch& arg, cb_type_t cb) {
+        auto parseArgument = [&args, &i](OptionSwitch& arg) {
             if( arg.HasParameter() ) {
                 // Has a param.  See if we have the param as being available.
                 if( (i + 1) < args.size() ) {
                     // Is available.  Trigger callback with args[i + 1].
                     i += 1;
-                    cb(args[i]);
+                    arg.CallCallback(args[i]);
                 } else if( arg.ParamOptional() ) {
                     // Param is not available, is optional.  Trigger callback.
-                    cb("");
+                    arg.CallCallback();
                 } else {
                     // Param is not available, not optional.  Error.
                     throw MissingArgumentError(args[i].c_str());
                 }
             } else {
                 // No param.  Trigger callback.
-                cb("");
+                arg.CallCallback();
             }
         };
 
@@ -187,26 +211,32 @@ public:
             if( curr.length() > 0 && curr[0] == '-' ) {
                 if( curr.length() < 2 ) {
                     // Too short - don't know what this is supposed to be.
-                    throw InvalidSwitchError(curr.c_str());
+                    return Expected<std::vector<std::string>>::fromException(
+                                InvalidSwitchError(curr.c_str())
+                            );
                 }
 
                 if( curr[1] == '-' ) {
                     // It's a long option.
                     bool found = false;
-                    for( auto t : m_options ) {
-                        auto opt = std::get<0>(t);
-                        auto cb  = std::get<1>(t);
+                    for( auto opt : m_options ) {
                         if( opt.HasLongOpt() &&
                             0 == curr.compare(2, curr.size() - 2, opt.LongOpt()) )
                         {
                             found = true;
-                            parseArgument(opt, cb);
+                            try {
+                                parseArgument(opt);
+                            } catch( const MissingArgumentError& e ) {
+                                return Expected<std::vector<std::string>>::fromException(e);
+                            }
                             break;
                         }
                     }
 
                     if( !found ) {
-                        throw InvalidSwitchError(curr.c_str());
+                        return Expected<std::vector<std::string>>::fromException(
+                                    InvalidSwitchError(curr.c_str())
+                                );
                     }
                 } else {
                     // It's a short option, or sequence thereof.
@@ -216,19 +246,22 @@ public:
                     // not.  We validate this here.
                     if( 2 == curr.length() ) {
                         bool found = false;
-                        for( auto t : m_options ) {
-                            auto opt = std::get<0>(t);
-                            auto cb  = std::get<1>(t);
+                        for( auto opt : m_options ) {
                             if( opt.HasShortOpt() && opt.ShortOpt()[0] == curr[1] )
                             {
                                 found = true;
-                                parseArgument(opt, cb);
+                                try {
+                                    parseArgument(opt);
+                                } catch( const MissingArgumentError& e ) {
+                                    return Expected<std::vector<std::string>>::fromException(e);
+                                }
                                 break;
                             }
                         }
 
                         if( !found ) {
-                            throw InvalidSwitchError(curr.c_str());
+                            return Expected<std::vector<std::string>>::fromException(
+                                        InvalidSwitchError(curr.c_str()));
                         }
                     } else {
                         // Longer than 2 characters - need to iterate over each character.
@@ -237,26 +270,30 @@ public:
 
                             // Validate that this argument exists, and does not have a param
                             bool found = false;
-                            for( auto t : m_options ) {
-                                auto opt = std::get<0>(t);
-                                auto cb  = std::get<1>(t);
+                            for( auto opt : m_options ) {
                                 if( opt.HasShortOpt() && opt.ShortOpt()[0] == ch )
                                 {
                                     // If this option would have a parameter, then it's an error.
                                     if( opt.HasParameter() ) {
                                         char temp_buff[3] = {'-', ch, '\0'};
-                                        throw InvalidPositionError(temp_buff);
+                                        return Expected<std::vector<std::string>>::fromException(
+                                                InvalidPositionError(temp_buff));
                                     }
 
                                     found = true;
-                                    parseArgument(opt, cb);
+                                    try {
+                                        parseArgument(opt);
+                                    } catch( const MissingArgumentError& e ) {
+                                        return Expected<std::vector<std::string>>::fromException(e);
+                                    }
                                     break;
                                 }
                             }
 
                             if( !found ) {
                                 char temp_buff[3] = {'-', ch, '\0'};
-                                throw InvalidSwitchError(temp_buff);
+                                return Expected<std::vector<std::string>>::fromException(
+                                        InvalidSwitchError(temp_buff));
                             }
                         }
                     }
@@ -277,29 +314,11 @@ public:
         return std::move(rest);
     }
 
-    void On(OptionSwitch option, cb_type_t cb) {
-        m_options.emplace_back(option, cb, false);
-    }
-
-    void On(OptionSwitch option, std::function<void()> cb) {
-        // Create a lambda that wraps this function.
-        auto wrapper = [=](const std::string&) -> void {
-            cb();
-        };
-        m_options.emplace_back(option, wrapper, true);
-    }
-
-    // TODO: more wrappers?
-    void On(std::string& shortOpt, std::string& longOpt, cb_type_t cb) {
-        On(OptionSwitch(shortOpt, longOpt), cb);
-    }
-    void On(std::string& shortOpt, std::string& longOpt, std::function<void()> cb) {
-        On(OptionSwitch(shortOpt, longOpt), cb);
-    }
-    void On(std::string& shortOpt, std::string& longOpt, bool hasParam, cb_type_t cb) {
-        On(OptionSwitch(shortOpt, longOpt, hasParam), cb);
-    }
-    void On(std::string& shortOpt, std::string& longOpt, bool hasParam, std::function<void()> cb) {
-        On(OptionSwitch(shortOpt, longOpt, hasParam), cb);
+    template <typename ...Args>
+    OptionSwitch& On(Args&&... args) {
+        m_options.emplace_back(args...);
+        return m_options[m_options.size() - 1];
     }
 };
+
+#endif

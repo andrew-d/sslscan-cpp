@@ -1,3 +1,6 @@
+#ifndef SSL_H
+#define SSL_H
+
 #include <vector>
 
 #include <openssl/err.h>
@@ -159,3 +162,5 @@ namespace ssl {
         }
     };
 }
+
+#endif
